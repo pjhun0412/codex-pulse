@@ -1,6 +1,6 @@
 [package]
 name = "codex-pulse"
-version = "0.1.0"
+version = "0.1.1"
 description = "Codex usage and Windows resource taskbar widget"
 authors = ["Codex Pulse"]
 edition = "2021"
