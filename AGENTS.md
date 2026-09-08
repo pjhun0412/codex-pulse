@@ -15,6 +15,8 @@ When implementing from a selected generated mock, treat that image as the source
 - Never invent a subscription expiration date. Show only fields returned by Codex app-server; rate-limit reset times are allowed.
 - Never show fabricated usage or system metrics. Unavailable values must render as `-` with the actual connection error.
 - Support two placement modes: a Win32 child window embedded under Explorer's taskbar window, and a draggable free overlay.
+- Taskbar mode must follow the taskbar's stacking and visibility. Do not force the widget above fullscreen applications or remote desktop windows; use a real `WS_CHILD` parent relationship instead of a topmost popup.
+- Keep the native taskbar widget compact at 248 logical pixels wide. Preserve both metric columns with tighter padding, and keep its background stable while menus or detail panels cover nearby screen pixels.
 - Keep the compact bar and detail popup as separate native windows. Do not resize one transparent window to toggle details.
 - Close the detail popup only after both native windows lose focus, so clicks between the compact bar and detail panel remain usable.
 

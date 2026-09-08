@@ -12,18 +12,16 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use windows_sys::Win32::{
-    Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-    Graphics::Dwm::DwmExtendFrameIntoClientArea,
+    Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
     Graphics::Gdi::{
-        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-        CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetPixel,
-        InvalidateRect, ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
+        BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
+        DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetPixel, InvalidateRect,
+        ReleaseDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
         DEFAULT_CHARSET, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, PAINTSTRUCT,
-        SRCCOPY, TRANSPARENT,
+        TRANSPARENT,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Controls::MARGINS,
         HiDpi::{
             GetDpiForWindow, SetThreadDpiAwarenessContext,
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -31,20 +29,19 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
         WindowsAndMessaging::{
             AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-            DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW,
-            GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindowVisible, KillTimer, LoadCursorW,
-            PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
-            SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-            TrackPopupMenuEx, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-            GWLP_HWNDPARENT, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED,
-            MF_SEPARATOR, MF_STRING, MSG, SC_MINIMIZE, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, TPM_RETURNCMD,
-            TPM_RIGHTBUTTON, WINDOWPOS, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-            WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND,
-            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE,
-            WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_TIMER,
-            WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_POPUP,
+            DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW, GetParent,
+            GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW,
+            PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
+            SetParent, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenuEx,
+            TranslateMessage, UpdateLayeredWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+            GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTCLIENT, HWND_TOP, IDC_ARROW, MA_NOACTIVATE,
+            MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+            SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+            ULW_OPAQUE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
+            WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT,
+            WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
         },
     },
 };
@@ -56,7 +53,7 @@ use crate::{
 
 const CLASS_NAME: &str = "CodexPulseNativeTaskbarWidget";
 const WINDOW_TITLE: &str = "Codex Pulse Native Widget";
-const LOGICAL_WIDTH: i32 = 306;
+const LOGICAL_WIDTH: i32 = 248;
 const LOGICAL_HEIGHT: i32 = 48;
 const POSITION_TIMER_ID: usize = 1;
 const POSITION_TIMER_MS: u32 = 100;
@@ -130,11 +127,12 @@ struct DragState {
 struct NativeWidgetShared {
     hwnd: AtomicIsize,
     visible: AtomicBool,
+    shutting_down: AtomicBool,
     menu_open: AtomicBool,
     last_interaction_ms: AtomicU64,
     timer_ticks: AtomicU32,
+    taskbar_color: AtomicU32,
     dock_available: AtomicBool,
-    taskbar_owner: AtomicIsize,
     last_bounds: Mutex<Option<Bounds>>,
     model: Mutex<NativeWidgetModel>,
     drag: Mutex<DragState>,
@@ -150,11 +148,12 @@ impl NativeWidgetController {
         let shared = Arc::new(NativeWidgetShared {
             hwnd: AtomicIsize::new(0),
             visible: AtomicBool::new(true),
+            shutting_down: AtomicBool::new(false),
             menu_open: AtomicBool::new(false),
             last_interaction_ms: AtomicU64::new(0),
             timer_ticks: AtomicU32::new(0),
+            taskbar_color: AtomicU32::new(u32::MAX),
             dock_available: AtomicBool::new(true),
-            taskbar_owner: AtomicIsize::new(0),
             last_bounds: Mutex::new(None),
             model: Mutex::new(NativeWidgetModel::default()),
             drag: Mutex::new(DragState::default()),
@@ -231,14 +230,18 @@ impl NativeWidgetController {
     }
 
     pub fn show_taskbar(&self) {
+        self.shared.visible.store(true, Ordering::Release);
         self.post(MSG_SHOW_TASKBAR);
     }
 
     pub fn hide(&self) {
+        // Preserve the user's choice even while Explorer is recreating the HWND.
+        self.shared.visible.store(false, Ordering::Release);
         self.post(MSG_HIDE_WIDGET);
     }
 
     pub fn shutdown(&self) {
+        self.shared.shutting_down.store(true, Ordering::Release);
         self.post(MSG_SHUTDOWN);
     }
 
@@ -317,7 +320,6 @@ unsafe fn run_window_thread(
     }
 
     let class_name = wide(CLASS_NAME);
-    let title = wide(WINDOW_TITLE);
     let class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW,
@@ -336,9 +338,56 @@ unsafe fn run_window_thread(
         return Err(format!("RegisterClassExW 실패: {}", GetLastError()));
     }
 
+    create_widget_window(&shared)?;
+    // A thread timer survives destruction of Explorer's taskbar and its children.
+    // Child windows do not receive the TaskbarCreated top-level broadcast.
+    let timer = SetTimer(null_mut(), 0, POSITION_TIMER_MS, None);
+    if timer == 0 {
+        DestroyWindow(shared.hwnd.load(Ordering::Acquire) as HWND);
+        return Err(format!("위젯 복구 타이머 생성 실패: {}", GetLastError()));
+    }
+    let _ = ready.send(Ok(()));
+
+    let mut message = MSG::default();
+    while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+        if shared.shutting_down.load(Ordering::Acquire) {
+            break;
+        }
+        if message.hwnd.is_null() && message.message == WM_TIMER && message.wParam == timer {
+            let mut hwnd = shared.hwnd.load(Ordering::Acquire) as HWND;
+            if hwnd.is_null() {
+                if taskbar::taskbar_windows_all().is_empty() {
+                    continue;
+                }
+                hwnd = match create_widget_window(&shared) {
+                    Ok(hwnd) => hwnd,
+                    Err(error) => {
+                        crate::logging::write(error);
+                        continue;
+                    }
+                };
+            }
+            window_proc(hwnd, WM_TIMER, POSITION_TIMER_ID, 0);
+        } else {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    KillTimer(null_mut(), timer);
+    let hwnd = shared.hwnd.load(Ordering::Acquire) as HWND;
+    if !hwnd.is_null() {
+        DestroyWindow(hwnd);
+    }
+    Ok(())
+}
+
+unsafe fn create_widget_window(shared: &Arc<NativeWidgetShared>) -> Result<HWND, String> {
+    let instance = GetModuleHandleW(null());
+    let class_name = wide(CLASS_NAME);
+    let title = wide(WINDOW_TITLE);
     let raw_shared = Arc::into_raw(shared.clone());
     let hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         class_name.as_ptr(),
         title.as_ptr(),
         WS_POPUP,
@@ -355,12 +404,8 @@ unsafe fn run_window_thread(
         return Err(format!("CreateWindowExW 실패: {}", GetLastError()));
     }
 
-    enable_dwm_glass(hwnd);
-
     shared.hwnd.store(hwnd as isize, Ordering::Release);
-    position_over_taskbar(hwnd, &shared);
-    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    SetTimer(hwnd, POSITION_TIMER_ID, POSITION_TIMER_MS, None);
+    position_over_taskbar(hwnd, shared);
 
     let style = GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE);
     let ex_style = GetWindowLongPtrW(
@@ -370,16 +415,7 @@ unsafe fn run_window_thread(
     crate::logging::write(format!(
         "native taskbar widget ready; hwnd={hwnd:?}, style={style:#x}, ex_style={ex_style:#x}"
     ));
-    let _ = ready.send(Ok(()));
-
-    let mut message = MSG::default();
-    while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-
-    shared.hwnd.store(0, Ordering::Release);
-    Ok(())
+    Ok(hwnd)
 }
 
 unsafe extern "system" fn window_proc(
@@ -415,28 +451,8 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_ERASEBKGND => 1,
+        WM_NCHITTEST => HTCLIENT as LRESULT,
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
-        WM_SYSCOMMAND
-            if shared
-                .map(|shared| shared.visible.load(Ordering::Acquire))
-                .unwrap_or(false)
-                && (wparam & 0xfff0) == SC_MINIMIZE as usize =>
-        {
-            0
-        }
-        WM_WINDOWPOSCHANGING => {
-            if shared
-                .map(|shared| shared.visible.load(Ordering::Acquire))
-                .unwrap_or(false)
-            {
-                let position = lparam as *mut WINDOWPOS;
-                if !position.is_null() {
-                    (*position).flags &= !(SWP_HIDEWINDOW | SWP_NOZORDER);
-                    (*position).hwndInsertAfter = HWND_TOPMOST;
-                }
-            }
-            DefWindowProcW(hwnd, message, wparam, lparam)
-        }
         WM_LBUTTONDOWN => {
             if let Some(shared) = shared {
                 record_interaction(shared);
@@ -485,7 +501,7 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_CONTEXTMENU => {
+        WM_CONTEXTMENU | windows_sys::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP => {
             if let Some(shared) = shared {
                 record_interaction(shared);
                 show_context_menu(hwnd, shared);
@@ -493,11 +509,19 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DWMCOMPOSITIONCHANGED => {
-            enable_dwm_glass(hwnd);
+            if let Err(error) = reset_widget_layer(hwnd) {
+                crate::logging::write(format!("native widget layer reset failed: {error}"));
+            }
             InvalidateRect(hwnd, null(), 0);
             0
         }
-        WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_DPICHANGED => {
+        WM_DPICHANGED => {
+            // SetParent may change DPI synchronously. Let the timer reposition
+            // after reparenting completes instead of entering it recursively.
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
             if let Some(shared) = shared {
                 position_over_taskbar(hwnd, shared);
                 InvalidateRect(hwnd, null(), 0);
@@ -508,9 +532,6 @@ unsafe extern "system" fn window_proc(
             if let Some(shared) = shared {
                 let tick = shared.timer_ticks.fetch_add(1, Ordering::AcqRel) + 1;
                 if shared.visible.load(Ordering::Acquire) {
-                    if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
-                        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                    }
                     position_over_taskbar(hwnd, shared);
                 }
                 if tick % 10 == 0 {
@@ -527,7 +548,6 @@ unsafe extern "system" fn window_proc(
             if let Some(shared) = shared {
                 shared.visible.store(true, Ordering::Release);
                 position_over_taskbar(hwnd, shared);
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 InvalidateRect(hwnd, null(), 0);
                 crate::logging::write("native widget visibility: shown");
             }
@@ -542,16 +562,21 @@ unsafe extern "system" fn window_proc(
             0
         }
         MSG_SHUTDOWN | WM_CLOSE => {
+            if let Some(shared) = shared {
+                shared.shutting_down.store(true, Ordering::Release);
+            }
             DestroyWindow(hwnd);
-            0
-        }
-        WM_DESTROY => {
-            KillTimer(hwnd, POSITION_TIMER_ID);
-            crate::logging::write("native taskbar widget destroyed");
             PostQuitMessage(0);
             0
         }
+        WM_DESTROY => {
+            crate::logging::write("native taskbar widget destroyed");
+            0
+        }
         WM_NCDESTROY => {
+            if let Some(shared) = shared {
+                shared.hwnd.store(0, Ordering::Release);
+            }
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             let result = DefWindowProcW(hwnd, message, wparam, lparam);
             if !shared_ptr.is_null() {
@@ -563,55 +588,71 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-unsafe fn enable_dwm_glass(hwnd: HWND) {
-    let margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
-    let result = DwmExtendFrameIntoClientArea(hwnd, &margins);
-    if result < 0 {
-        crate::logging::write(format!(
-            "native widget DWM transparency setup failed: {result:#x}"
-        ));
-    }
-}
-
-unsafe fn taskbar_background_is_light(hwnd: HWND) -> Option<bool> {
+unsafe fn taskbar_background_color(hwnd: HWND) -> Option<u32> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
     let mut bounds = RECT::default();
     if GetWindowRect(hwnd, &mut bounds) == 0 {
         return None;
     }
 
+    let sample = POINT {
+        x: bounds.right + 2,
+        y: bounds.top + 2,
+    };
+    // Menus, detail panels and fullscreen windows can cover this point. Never
+    // derive taskbar theme colors from their pixels.
+    let hit = WindowFromPoint(sample);
+    if hit.is_null() || GetAncestor(hit, GA_ROOT) != GetAncestor(hwnd, GA_ROOT) {
+        return None;
+    }
     let dc = GetDC(null_mut());
     if dc.is_null() {
         return None;
     }
-    let color = GetPixel(dc, bounds.right - 2, bounds.top + 2);
+    // Sample outside the opaque child instead of sampling our own paint.
+    let color = GetPixel(dc, sample.x, sample.y);
     ReleaseDC(null_mut(), dc);
     if color == u32::MAX {
         return None;
     }
 
-    let red = color & 0xff;
-    let green = (color >> 8) & 0xff;
-    let blue = (color >> 16) & 0xff;
-    let luminance = (red * 299 + green * 587 + blue * 114) / 1000;
-    Some(luminance >= 145)
+    Some(color)
+}
+
+unsafe fn reset_widget_layer(hwnd: HWND) -> Result<(), u32> {
+    // Reparenting invalidates the old redirected surface even though GDI blits
+    // and hit tests still succeed. Recreate layering AFTER SetParent.
+    let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as isize);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as isize);
+    if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED == 0 {
+        return Err(GetLastError());
+    }
+    InvalidateRect(hwnd, null(), 0);
+    Ok(())
+}
+
+unsafe fn attach_widget_window(hwnd: HWND, parent: HWND) -> Result<(), u32> {
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, ((style & !WS_POPUP) | WS_CHILD) as isize);
+    SetParent(hwnd, parent);
+    // A null return can also mean successful reparenting from the desktop.
+    if GetParent(hwnd) != parent {
+        let error = GetLastError();
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
+        return Err(error);
+    }
+    Ok(())
 }
 
 unsafe fn position_over_taskbar(hwnd: HWND, shared: &NativeWidgetShared) {
     let taskbars = taskbar::taskbar_windows_all();
     if taskbars.is_empty() {
+        ShowWindow(hwnd, SW_HIDE);
         if shared.dock_available.swap(false, Ordering::AcqRel) {
             crate::logging::write("native widget: Windows 작업표시줄을 찾을 수 없습니다.");
         }
         return;
-    }
-
-    if !shared.dock_available.swap(true, Ordering::AcqRel) {
-        crate::logging::write("native widget: taskbar docking recovered");
     }
 
     let mut current = RECT::default();
@@ -631,8 +672,33 @@ unsafe fn position_over_taskbar(hwnd: HWND, shared: &NativeWidgetShared) {
         .min_by_key(|window| distance_to_bounds(center_x, center_y, window.bounds))
         .unwrap();
     let taskbar_bounds = taskbar.bounds;
+    // Keep the layered widget directly under the taskbar. The XAML composition
+    // bridge can paint children but does not route native mouse hits to them.
+    let parent = taskbar.hwnd as HWND;
+    let parent_changed = GetParent(hwnd) != parent;
+    if parent_changed {
+        if let Err(error) = attach_widget_window(hwnd, parent) {
+            ShowWindow(hwnd, SW_HIDE);
+            if shared.dock_available.swap(false, Ordering::AcqRel) {
+                crate::logging::write(format!("native widget SetParent failed: {error}"));
+            }
+            return;
+        }
+        if let Err(error) = reset_widget_layer(hwnd) {
+            ShowWindow(hwnd, SW_HIDE);
+            crate::logging::write(format!("native widget layer setup failed: {error}"));
+            return;
+        }
+        crate::logging::write(format!(
+            "native widget attached as taskbar child; taskbar_hwnd={:#x}",
+            taskbar.hwnd
+        ));
+    }
+    if !shared.dock_available.swap(true, Ordering::AcqRel) {
+        crate::logging::write("native widget: taskbar docking recovered");
+    }
 
-    let dpi = GetDpiForWindow(hwnd).max(96);
+    let dpi = GetDpiForWindow(parent).max(96);
     let scale = dpi as f64 / 96.0;
     let offset = (8.0 * scale).round() as i32;
     let taskbar_width = (taskbar_bounds.right - taskbar_bounds.left).max(1);
@@ -660,15 +726,6 @@ unsafe fn position_over_taskbar(hwnd: HWND, shared: &NativeWidgetShared) {
         right: x + width,
         bottom: y + height,
     };
-    let owner_changed = shared.taskbar_owner.swap(taskbar.hwnd, Ordering::AcqRel) != taskbar.hwnd;
-    if owner_changed {
-        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, taskbar.hwnd);
-        crate::logging::write(format!(
-            "native widget taskbar owner changed; taskbar_hwnd={:#x}",
-            taskbar.hwnd
-        ));
-    }
-
     let mut bounds_changed = true;
     if let Ok(mut previous) = shared.last_bounds.lock() {
         let changed = previous
@@ -689,33 +746,46 @@ unsafe fn position_over_taskbar(hwnd: HWND, shared: &NativeWidgetShared) {
         bounds_changed = changed;
     }
 
-    if owner_changed || bounds_changed {
-        SetWindowPos(
+    if parent_changed || bounds_changed {
+        // GetWindowRect and popup anchors use screen coordinates; child window
+        // placement uses the taskbar's client coordinates (also on other monitors).
+        let mut origin = POINT { x, y };
+        if ScreenToClient(parent, &mut origin) == 0 {
+            ShowWindow(hwnd, SW_HIDE);
+            if let Ok(mut previous) = shared.last_bounds.lock() {
+                *previous = None;
+            }
+            return;
+        }
+        if SetWindowPos(
             hwnd,
-            HWND_TOPMOST,
-            x,
-            y,
+            HWND_TOP,
+            origin.x,
+            origin.y,
             width,
             height,
-            SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-        );
-    } else if shared.visible.load(Ordering::Acquire) {
-        // Capture overlays and Explorer can reorder the topmost band without moving
-        // this window. Reassert only the Z-order so the widget returns without
-        // resizing, repainting, or stealing focus.
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-        );
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+        ) == 0
+        {
+            ShowWindow(hwnd, SW_HIDE);
+            if let Ok(mut previous) = shared.last_bounds.lock() {
+                *previous = None;
+            }
+            return;
+        }
+    }
+    // Check this window's own visibility bit, not IsWindowVisible: the latter
+    // includes parent visibility and must not undo taskbar auto-hide/fullscreen.
+    if shared.visible.load(Ordering::Acquire)
+        && GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_VISIBLE == 0
+    {
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
 }
 
 unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
+    static PAINT_COUNT: AtomicU32 = AtomicU32::new(0);
+    let first_paint = PAINT_COUNT.fetch_add(1, Ordering::Relaxed) == 0;
     let mut paint = PAINTSTRUCT::default();
     let target_dc = BeginPaint(hwnd, &mut paint);
     if target_dc.is_null() {
@@ -735,10 +805,6 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
     }
     let previous_bitmap = SelectObject(memory_dc, bitmap);
 
-    let background = CreateSolidBrush(rgb(0, 0, 0));
-    FillRect(memory_dc, &client, background);
-    DeleteObject(background);
-
     let dpi = GetDpiForWindow(hwnd).max(96);
     let scale = dpi as f64 / 96.0;
     let layout_height = (LOGICAL_HEIGHT as f64 * scale).round() as i32;
@@ -747,8 +813,31 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
 
     let model = shared.model.lock().ok();
     let theme = model.as_ref().map(|model| model.theme).unwrap_or_default();
-    let background_is_light =
-        taskbar_background_is_light(hwnd).unwrap_or(theme == WidgetTheme::Light);
+    if !shared.menu_open.load(Ordering::Acquire)
+        && !model
+            .as_ref()
+            .map(|model| model.detail_visible)
+            .unwrap_or(false)
+    {
+        if let Some(color) = taskbar_background_color(hwnd) {
+            shared.taskbar_color.store(color, Ordering::Release);
+        }
+    }
+    let cached_color = shared.taskbar_color.load(Ordering::Acquire);
+    let background_color = if cached_color != u32::MAX {
+        cached_color
+    } else if theme == WidgetTheme::Light {
+        rgb(235, 238, 242)
+    } else {
+        rgb(28, 34, 44)
+    };
+    let background = CreateSolidBrush(background_color);
+    FillRect(memory_dc, &client, background);
+    DeleteObject(background);
+    let red = background_color & 0xff;
+    let green = (background_color >> 8) & 0xff;
+    let blue = (background_color >> 16) & 0xff;
+    let background_is_light = (red * 299 + green * 587 + blue * 114) / 1000 >= 145;
     let (label_color, value_color, secondary_color, separator_color, codex_accent) =
         if background_is_light {
             (
@@ -809,9 +898,9 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         "CODEX",
-        sx(28),
+        sx(20),
         y_offset + sx(4),
-        sx(55),
+        sx(48),
         sx(23),
         label_color,
         label_font,
@@ -822,7 +911,7 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         &codex,
-        sx(82),
+        sx(70),
         y_offset + sx(4),
         sx(54),
         sx(23),
@@ -835,9 +924,9 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         "RESET",
-        sx(28),
+        sx(20),
         y_offset + sx(25),
-        sx(42),
+        sx(36),
         sx(18),
         secondary_color,
         small_font,
@@ -848,7 +937,7 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         &reset,
-        sx(65),
+        sx(57),
         y_offset + sx(25),
         sx(72),
         sx(18),
@@ -862,9 +951,9 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         "CPU",
-        sx(173),
+        sx(155),
         y_offset + sx(3),
-        sx(39),
+        sx(35),
         sx(22),
         label_color,
         label_font,
@@ -875,9 +964,9 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         &cpu,
-        sx(207),
+        sx(190),
         y_offset + sx(3),
-        sx(55),
+        sx(48),
         sx(22),
         value_color,
         value_font,
@@ -889,9 +978,9 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         "MEM",
-        sx(173),
+        sx(155),
         y_offset + sx(23),
-        sx(39),
+        sx(35),
         sx(22),
         label_color,
         label_font,
@@ -902,9 +991,9 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
         memory_dc,
         direct_text.as_ref(),
         &memory,
-        sx(207),
+        sx(190),
         y_offset + sx(23),
-        sx(55),
+        sx(48),
         sx(22),
         value_color,
         value_font,
@@ -917,7 +1006,7 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
     }
     fill(
         memory_dc,
-        sx(16),
+        sx(8),
         y_offset + sx(8),
         sx(3),
         sx(17),
@@ -925,7 +1014,7 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
     );
     fill(
         memory_dc,
-        sx(147),
+        sx(135),
         y_offset + sx(6),
         1,
         sx(36),
@@ -933,7 +1022,7 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
     );
     fill(
         memory_dc,
-        sx(161),
+        sx(145),
         y_offset + sx(7),
         sx(3),
         sx(15),
@@ -941,13 +1030,35 @@ unsafe fn paint_widget(hwnd: HWND, shared: &NativeWidgetShared) {
     );
     fill(
         memory_dc,
-        sx(161),
+        sx(145),
         y_offset + sx(27),
         sx(3),
         sx(15),
         rgb(155, 104, 232),
     );
-    BitBlt(target_dc, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
+    // Supply the opaque bitmap directly. SetLayeredWindowAttributes on layered
+    // child windows can let clicks pass through despite a visible image.
+    let size = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let source = POINT { x: 0, y: 0 };
+    let painted = UpdateLayeredWindow(
+        hwnd,
+        null_mut(),
+        null(),
+        &size,
+        memory_dc,
+        &source,
+        0,
+        null(),
+        ULW_OPAQUE,
+    );
+    if first_paint {
+        let mut clip = RECT::default();
+        let clip_type = windows_sys::Win32::Graphics::Gdi::GetClipBox(target_dc, &mut clip);
+        crate::logging::write(format!("native widget first paint: {width}x{height}, copied={painted}, clip={clip_type} ({},{},{},{})", clip.left, clip.top, clip.right, clip.bottom));
+    }
 
     SelectObject(memory_dc, previous_bitmap);
     DeleteObject(bitmap);
@@ -1188,4 +1299,115 @@ fn rgb(red: u8, green: u8, blue: u8) -> u32 {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod docking_tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsWindow, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOPMOST,
+    };
+
+    struct TestWindow(HWND);
+
+    impl TestWindow {
+        unsafe fn new() -> Self {
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                wide("STATIC").as_ptr(),
+                wide("Codex Pulse hidden docking test").as_ptr(),
+                WS_POPUP,
+                100,
+                200,
+                500,
+                48,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            assert!(!hwnd.is_null());
+            Self(hwnd)
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe {
+                if IsWindow(self.0) != 0 {
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn docked_window_inherits_parent_visibility_and_lifetime() {
+        unsafe {
+            // Use hidden test windows: do not hide or restart the user's Explorer.
+            let parent = TestWindow::new();
+            let widget = TestWindow::new();
+            attach_widget_window(widget.0, parent.0).unwrap();
+            assert_eq!(GetParent(widget.0), parent.0);
+            let style = GetWindowLongPtrW(widget.0, GWL_STYLE) as u32;
+            assert_ne!(style & WS_CHILD, 0);
+            assert_eq!(style & WS_POPUP, 0);
+            assert_eq!(
+                GetWindowLongPtrW(widget.0, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST,
+                0
+            );
+
+            let mut parent_rect = RECT::default();
+            assert_ne!(GetWindowRect(parent.0, &mut parent_rect), 0);
+            let mut origin = POINT {
+                x: parent_rect.left + 8,
+                y: parent_rect.top,
+            };
+            assert_ne!(ScreenToClient(parent.0, &mut origin), 0);
+            assert_ne!(
+                SetWindowPos(
+                    widget.0,
+                    HWND_TOP,
+                    origin.x,
+                    origin.y,
+                    306,
+                    48,
+                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED
+                ),
+                0
+            );
+            let mut actual = RECT::default();
+            assert_ne!(GetWindowRect(widget.0, &mut actual), 0);
+            assert_eq!(actual.left, parent_rect.left + 8);
+            assert_eq!(actual.top, parent_rect.top);
+
+            ShowWindow(widget.0, SW_SHOWNOACTIVATE);
+            assert_ne!(
+                GetWindowLongPtrW(widget.0, GWL_STYLE) as u32 & WS_VISIBLE,
+                0
+            );
+            assert_eq!(
+                IsWindowVisible(widget.0),
+                0,
+                "hidden parent must hide child"
+            );
+            drop(parent);
+            assert_eq!(
+                IsWindow(widget.0),
+                0,
+                "parent destruction must destroy child"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_attachment_restores_popup_style() {
+        unsafe {
+            let widget = TestWindow::new();
+            let original = GetWindowLongPtrW(widget.0, GWL_STYLE);
+            assert!(attach_widget_window(widget.0, -1isize as HWND).is_err());
+            assert_eq!(GetWindowLongPtrW(widget.0, GWL_STYLE), original);
+            assert!(GetParent(widget.0).is_null());
+        }
+    }
 }
